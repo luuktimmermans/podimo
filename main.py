@@ -148,16 +148,16 @@ async def index():
             podcast_id = quote(str(podcast_id), safe="")
             region = quote(str(region), safe="")
             locale = quote(str(locale), safe="")
-            
+
             if LOCAL_CREDENTIALS:
                 url = f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/feed/{podcast_id}.xml?{randomHexId(10)}&region={region}&locale={locale}"
             else:
                 email = quote(str(email), safe="")
                 comma = quote(',', safe="")
                 username = f"{email}{comma}{region}{comma}{locale}"
-                password = quote(str(password), safe="")             
+                password = quote(str(password), safe="")
                 url = f"{PODIMO_PROTOCOL}://{username}:{password}@{PODIMO_HOSTNAME}/feed/{podcast_id}.xml?{randomHexId(10)}&region={region}&locale={locale}"
-            
+
             logging.debug(f"Created an URL: {url}.")
             return await render_template("feed_location.html", url=url)
 
@@ -204,13 +204,13 @@ def token_key(username, password):
 
 @app.route("/feed/<string:username>/<string:password>/<string:podcast_id>.xml")
 async def serve_feed(username, password, podcast_id, region, locale):
-    
+
     logging.debug(f"Feed request for podcast {podcast_id} from IP {request.remote_addr} with User-Agent:{request.user_agent}.")
-    
+
     # Check if it is a valid podcast id string
     if podcast_id_pattern.fullmatch(podcast_id) is None:
         return Response("Invalid podcast id format", 400, {})
-   
+
     if region not in [region_code for (region_code, _) in REGIONS]:
         return Response("Invalid region", 400, {})
     if locale not in LOCALES:
@@ -219,8 +219,8 @@ async def serve_feed(username, password, podcast_id, region, locale):
     # Check if url contains unique ID or podcastID in blocked list. If so, return HTTP code 410 GONE
     if any(item in request.url for item in BLOCKED):
         logging.debug(f"Blocked! Podcast {podcast_id} is on local block list")
-        return Response("Podcast is gone", 410, {}) 
-    
+        return Response("Podcast is gone", 410, {})
+
     with cloudscraper.create_scraper() as scraper:
         scraper.proxies = proxies
         client = await check_auth(username, password, region, locale, scraper)
@@ -302,11 +302,13 @@ async def addFeedEntry(fg, episode, session, locale):
     fe.title(episode["title"])
     fe.description(episode["description"])
     fe.pubDate(episode.get("publishDatetime", episode.get("datetime")))
-    fe.podcast.itunes_image(episode["imageUrl"])
+    image_url = episode.get("imageUrl")
+    if image_url and image_url.endswith((".png", ".jpg")):
+        fe.podcast.itunes_image(image_url)
 
     url, duration = extract_audio_url(episode)
     if url is None:
-        return 
+        return
     logging.debug(f"Found podcast '{episode['title']}'")
     fe.podcast.itunes_duration(duration)
     content_length, content_type = await urlHeadInfo(session, episode['id'], url, locale)
@@ -385,7 +387,7 @@ async def main():
 if __name__ == "__main__":
     if DEBUG:
         logging.info(f"""Spawning server on {PODIMO_BIND_HOST}
-Configuration: 
+Configuration:
 - DEBUG: {DEBUG}
 - LOCAL CREDENTIALS: {LOCAL_CREDENTIALS} ({PODIMO_EMAIL})
 - PODIMO_HOSTNAME: {PODIMO_HOSTNAME}
