@@ -26,7 +26,7 @@ from podimo.client import PodimoClient
 from feedgen.feed import FeedGenerator
 from mimetypes import guess_type
 from aiohttp import ClientSession, CookieJar, ClientTimeout
-from quart import Quart, Response, render_template, request
+from quart import Quart, Response, render_template, request, redirect
 from hashlib import sha256
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
@@ -38,8 +38,11 @@ import podimo.cache as cache
 import cloudscraper
 import traceback
 
+from streaming_feed import register_routes as register_archive_routes, ensure_job, enabled as archive_enabled
+
 # Setup Quart, used for serving the web pages
 app = Quart(__name__)
+register_archive_routes(app, CACHE_DIR)
 proxies = dict()
 
 #Setup logging
@@ -150,6 +153,13 @@ async def index():
             region = quote(str(region), safe="")
             locale = quote(str(locale), safe="")
 
+            if LOCAL_CREDENTIALS and archive_enabled():
+                try:
+                    job = ensure_job(CACHE_DIR, podcast_id, region, locale)
+                except ValueError:
+                    return Response("Ongeldig podcast-ID.", 400)
+                return redirect(f"/stream/{job['token']}/status")
+
             if LOCAL_CREDENTIALS:
                 url = f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/feed/{podcast_id}.xml?{randomHexId(10)}&region={region}&locale={locale}"
             else:
@@ -178,6 +188,14 @@ async def serve_basic_auth_feed(podcast_id):
         args = request.args
         region = args.get("region")
         locale = args.get("locale")
+        if archive_enabled():
+            if region not in [code for code, _ in REGIONS] or locale not in LOCALES:
+                return Response("Ongeldige regio of taal.", 400)
+            try:
+                job = ensure_job(CACHE_DIR, podcast_id, region, locale)
+            except ValueError:
+                return Response("Ongeldig podcast-ID.", 400)
+            return redirect(f"/stream/{job['token']}/feed.xml")
         return await serve_feed(PODIMO_EMAIL, PODIMO_PASSWORD, podcast_id, region, locale)
     else:
         auth = request.authorization
@@ -450,4 +468,5 @@ Configuration:
 - BLOCKING: {BLOCKED}
 """)
     asyncio.run(main())
+
 
