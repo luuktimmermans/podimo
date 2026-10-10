@@ -389,6 +389,29 @@ async def podcastsToRss(podcast_id, data, locale):
     return feed
 
 
+
+# A separate, manually generated one-episode compatibility test.
+@app.route("/pocketcasts-test/<token>/<filename>")
+async def pocketcasts_test_file(token, filename):
+    from pathlib import Path
+    from quart import abort, send_from_directory
+
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        abort(404)
+    if filename not in {"feed.xml", "episode.m4a"}:
+        abort(404)
+
+    directory = Path(CACHE_DIR) / "pocketcasts-test" / token
+    response = await send_from_directory(
+        str(directory),
+        filename,
+        mimetype="application/rss+xml" if filename == "feed.xml" else "audio/mp4",
+        conditional=True,
+    )
+    response.timeout = None
+    return response
+
+
 async def spawn_web_server():
     config = Config()
     config.bind = [PODIMO_BIND_HOST]
@@ -427,3 +450,4 @@ Configuration:
 - BLOCKING: {BLOCKED}
 """)
     asyncio.run(main())
+
