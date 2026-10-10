@@ -64,11 +64,10 @@ def make_feed(job, data, base):
         raise ValueError('Dubbele aflevering-ID ontvangen.')
     root = ET.fromstring(build_feed(job, data.get('podcast') or {}, episodes,
                                     records, base, 'cover.jpg'))
-    # HLS is a playlist, not an MP4 file. Its byte length is not known/stable.
-    # Never advertise a guessed M4A size or disguise a playlist as audio/mp4.
+    # The endpoint produces real MP3 bytes. Final length is unknown until EOF.
     for enclosure in root.findall('./channel/item/enclosure'):
-        enclosure.set('url', enclosure.get('url').replace('.m4a', '.m3u8'))
-        enclosure.set('type', 'application/vnd.apple.mpegurl')
+        enclosure.set('url', enclosure.get('url').replace('.m4a', '.mp3'))
+        enclosure.set('type', 'audio/mpeg')
         enclosure.set('length', '0')
     xml = ET.tostring(root, encoding='utf-8', xml_declaration=True)
     return xml.replace(f'{base}/archive/{job["token"]}/'.encode(),
@@ -106,6 +105,7 @@ def register_routes(app, cache_dir):
     from quart import Response, abort, redirect, request, send_from_directory
     catalog = None
     image_lock = asyncio.Lock()
+    audio_slots = asyncio.Semaphore(2)
 
     async def get_data(job, fresh=False):
         nonlocal catalog
@@ -134,10 +134,10 @@ def register_routes(app, cache_dir):
                     f'<p><a href="/stream/{token}/feed.xml">Open de RSS-feed</a></p>'
                     '<p>Voeg die RSS-link als Private toe aan Pocket Casts. '
                     'De eerste keer ophalen kan even duren.</p>'
-                    '<p>Deze versie gebruikt HLS. Test eerst afspelen en vooruitspoelen '
+                    '<p>Deze versie maakt MP3 tijdens het afspelen. Vooruitspoelen buiten de buffer is niet gegarandeerd. Test afspelen '
                     'in Pocket Casts. Bewaar de feed-URL privé.</p></html>')
             return Response(body, mimetype='text/html')
-        is_audio = re.fullmatch(r'([0-9a-f-]{36})\.m3u8', filename)
+        is_audio = re.fullmatch(r'([0-9a-f-]{36})\.(?:mp3|m3u8)', filename)
         is_image = re.fullmatch(r'(cover|[0-9a-f-]{36})\.jpg', filename)
         if filename != 'feed.xml' and not is_audio and not is_image:
             abort(404)
@@ -152,9 +152,7 @@ def register_routes(app, cache_dir):
                 ep = next((e for e in episodes if e['id'] == is_audio[1]), None)
                 if ep is None:
                     abort(404)
-                # CDN handles playlists, segments, range requests and seeking.
-                # No credentials, cookies or authentication headers are forwarded.
-                return redirect(media_for(ep)['url'], code=307)
+                return await mp3_response(media_for(ep)['url'], request.method, audio_slots, Response)
             images = (data.get('podcast') or {}).get('images') or {}
             url = images.get('coverImageUrl') or (episodes[0].get('imageUrl') if episodes else None)
             if is_image[1] != 'cover':
@@ -187,3 +185,89 @@ def register_routes(app, cache_dir):
             response.headers['Cache-Control'] = 'private, no-store'
             response.headers['X-Robots-Tag'] = 'noindex, nofollow'
         return response
+
+
+async def mp3_response(url, method, slots, Response):
+    """Bounded, backpressured MP3 stream. No temporary audio files or fake ranges."""
+    headers = {'Accept-Ranges': 'none', 'X-Accel-Buffering': 'no',
+               'Content-Disposition': 'inline', 'Cache-Control': 'private, no-store'}
+    if method == 'HEAD':
+        result = Response(b'', mimetype='audio/mpeg', headers=headers)
+        # Empty HEAD body does not mean the resource has length zero.
+        result.automatically_set_content_length = False
+        result.headers.pop('Content-Length', None)
+        return result
+    try:
+        await asyncio.wait_for(slots.acquire(), timeout=1)
+    except asyncio.TimeoutError:
+        return Response('Alle audiostreams zijn in gebruik. Probeer opnieuw.', status=503,
+                        headers={'Retry-After':'15'})
+    child = None
+    closed = False
+    async def close():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        try:
+            if child is not None:
+                if child.returncode is None:
+                    try:
+                        child.kill()
+                    except ProcessLookupError:
+                        pass
+                # Drain the small bounded pipe after killing, to avoid a pipe
+                # transport waiting forever when the listener disconnected.
+                await child.communicate()
+        finally:
+            slots.release()
+    try:
+        child = await asyncio.create_subprocess_exec(
+            'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
+            '-rw_timeout', '30000000', '-protocol_whitelist', 'https,http,tcp,tls,crypto',
+            '-i', https_url(url), '-map', '0:a:0', '-vn', '-map_metadata', '-1',
+            '-af', 'asetpts=N/SR/TB', '-c:a', 'libmp3lame', '-b:a', '128k',
+            '-ar', '44100', '-ac', '2', '-write_xing', '0', '-id3v2_version', '0',
+            '-flush_packets', '1', '-f', 'mp3', 'pipe:1',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            limit=65536)
+        # Do not return a misleading HTTP 200 when FFmpeg cannot open the source.
+        first = await asyncio.wait_for(child.stdout.read(32768), timeout=45)
+        if not first:
+            raise RuntimeError('Geen audio ontvangen.')
+        async def body():
+            try:
+                yield first
+                while True:
+                    chunk = await asyncio.wait_for(child.stdout.read(32768), timeout=45)
+                    if not chunk:
+                        break
+                    yield chunk
+                await child.wait()
+                if child.returncode:
+                    raise RuntimeError('Audiobron onderbroken.')
+            finally:
+                await close()
+        result = Response(mimetype='audio/mpeg', headers=headers)
+        result.timeout = None
+        from quart.wrappers.response import ResponseBody
+        class ManagedBody(ResponseBody):
+            def __init__(self):
+                self.iterator = body()
+            async def __aenter__(self):
+                return self.iterator
+            async def __aexit__(self, exc_type, exc, tb):
+                try:
+                    await self.iterator.aclose()
+                finally:
+                    await close()
+        result.response = ManagedBody()
+        return result
+    except BaseException as exc:
+        await close()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        if not isinstance(exc, Exception):
+            raise
+        return Response('Audiobron tijdelijk niet beschikbaar. Probeer opnieuw.', status=502,
+                        headers={'Retry-After':'60'})
