@@ -119,11 +119,17 @@ async def export(podcast_id):
         directory = Path(temporary)
         audio = directory / "episode.m4a"
         await run_process(
-            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror",
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
             "-rw_timeout", "30000000",
             "-protocol_whitelist", "https,http,tcp,tls,crypto",
-            "-i", url, "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "96k",
-            "-movflags", "+faststart", "-y", str(audio),
+            "-i", url,
+            "-map", "0:a:0",
+            "-vn",
+            "-af", "asetpts=N/SR/TB",
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-movflags", "+faststart",
+            "-y", str(audio),
         )
         probe = json.loads(await run_process(
             "ffprobe", "-v", "error", "-select_streams", "a:0",
