@@ -158,7 +158,8 @@ async def index():
                     job = ensure_job(CACHE_DIR, podcast_id, region, locale)
                 except ValueError:
                     return Response("Ongeldig podcast-ID.", 400)
-                return redirect(f"/stream/{job['token']}/status")
+                url = f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/stream/{job['token']}/feed.xml"
+                return await render_template("feed_location.html", url=url)
 
             if LOCAL_CREDENTIALS:
                 url = f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/feed/{podcast_id}.xml?{randomHexId(10)}&region={region}&locale={locale}"
@@ -468,5 +469,6 @@ Configuration:
 - BLOCKING: {BLOCKED}
 """)
     asyncio.run(main())
+
 
 
