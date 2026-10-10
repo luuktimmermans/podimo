@@ -31,6 +31,7 @@ from hashlib import sha256
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from urllib.parse import quote
+from urllib.parse import urlsplit
 from podimo.config import *
 from podimo.utils import generateHeaders, randomHexId
 import podimo.cache as cache
@@ -279,21 +280,42 @@ async def urlHeadInfo(session, id, url, locale):
 
 
 def extract_audio_url(episode):
-    duration = 0
-    url = None
-    if episode['audio']:
-        url = episode['audio']['url']
-        duration = episode['audio']['duration']
+    candidates = []
 
-    if url is None or url == "":
-        if episode["streamMedia"]:
-            url = episode["streamMedia"]["url"]
-            duration = episode["streamMedia"]["duration"]
-            if "hls-media" in url and "/main.m3u8" in url:
-                url = url.replace("hls-media", "audios")
-                url = url.replace("/main.m3u8", ".mp3")
+    for field in ("audio", "streamMedia"):
+        media = episode.get(field) or {}
+        url = media.get("url")
 
-    return url, duration
+        if not url:
+            continue
+
+        duration = media.get("duration") or 0
+        path = urlsplit(url).path.lower()
+
+        # Log alleen het formaat, geen persoonlijke of ondertekende URL.
+        logging.info(
+            "Episode %s: %s heeft formaat %s",
+            episode.get("id"),
+            field,
+            path.rsplit(".", 1)[-1],
+        )
+
+        candidates.append((url, duration, path))
+
+    # Geef een rechtstreeks audiobestand voorrang boven HLS.
+    for url, duration, path in candidates:
+        if path.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus")):
+            return url, duration
+
+    # Behoud de beschikbare stream als er geen directe audiolink is.
+    if candidates:
+        logging.warning(
+            "Episode %s: geen directe audiolink gevonden",
+            episode.get("id"),
+        )
+        return candidates[0][0], candidates[0][1]
+
+    return None, 0
 
 
 async def addFeedEntry(fg, episode, session, locale):
